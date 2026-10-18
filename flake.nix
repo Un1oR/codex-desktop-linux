@@ -548,7 +548,7 @@
               ${lib.optionalString recordReplayBackendEnabled ''
               export CODEX_RECORD_REPLAY_LINUX_SOURCE="${workspaceHelpers}/bin/codex-record-replay-linux"
               ''}
-              ${lib.optionalString (lib.elem "global-dictation" effectiveFeatureIds) ''
+              ${lib.optionalString (lib.elem "global-dictation" effectiveFeatureIds || lib.elem "wayland-global-shortcuts" effectiveFeatureIds) ''
               export CODEX_GLOBAL_DICTATION_LINUX_SOURCE="${globalDictationHelper}/bin/codex-global-dictation-linux"
               ''}
               ${lib.optionalString (lib.elem "mcp-helper-reaper" effectiveFeatureIds) ''

@@ -10,7 +10,7 @@ die() { echo "[ci:${CI_JOB}][ERROR] $*" >&2; exit 1; }
 install_apt() {
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        bash ca-certificates curl dpkg-dev g++ gcc git gnupg make nodejs npm \
+        bash ca-certificates curl dbus dpkg-dev g++ gcc git gnupg make nodejs npm \
         pkg-config python3 ripgrep rpm rpm2cpio sudo tar unzip util-linux xz-utils
 }
 
@@ -48,6 +48,7 @@ run_core() {
     node_test_log="$(mktemp)"
     bash tests/scripts_smoke.sh
     if ! node --test scripts/patch-linux-window-ui.test.js scripts/patches/runner.test.js \
+        scripts/patches/lib/global-shortcuts-portal.test.js \
         scripts/patches/core/*/test.js \
         scripts/lib/linux-features.test.js linux-features/*/test.js >"$node_test_log" 2>&1; then
         rg -n -C 30 '^not ok' "$node_test_log" || tail -n 120 "$node_test_log"
@@ -57,6 +58,7 @@ run_core() {
     if command -v cargo >/dev/null 2>&1; then
         cargo test -p codex-update-manager
         cargo test -p codex-record-replay-linux
+        cargo test --manifest-path global-dictation-linux/Cargo.toml
     fi
 }
 
