@@ -205,10 +205,15 @@ test("Mini packaging retains its helper independently of global shortcuts", (t) 
   fs.writeFileSync(config, JSON.stringify({ enabled: ["pet-overlay"] }));
   fs.mkdirSync(path.dirname(helper), { recursive: true });
   fs.writeFileSync(helper, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  runPackageCommon(`CODEX_LINUX_FEATURES_CONFIG=${JSON.stringify(config)} stage_enabled_native_feature_artifacts ${JSON.stringify(builder)}`, app);
+  runPackageCommon(`export CODEX_LINUX_FEATURES_CONFIG=${JSON.stringify(config)}; stage_update_builder_linux_features_tree ${JSON.stringify(builder)}; stage_enabled_native_feature_artifacts ${JSON.stringify(builder)}`, app);
   const retained = path.join(builder, "linux-features/pet-overlay/kwin-helper/target/release/codex-pet-kwin");
   assert.equal(fs.readFileSync(retained, "utf8"), "#!/bin/sh\nexit 0\n");
   assert.equal(fs.statSync(retained).mode & 0o777, 0o755);
+  const feature = path.join(builder, "linux-features/pet-overlay");
+  for (const relative of ["kwin-helper/src", "kwin-helper/tests", "kwin-helper/Cargo.toml", "kwin-helper/Cargo.lock"])
+    assert.equal(fs.existsSync(path.join(feature, relative)), false, relative);
+  for (const relative of ["patch.js", "native-kwin.cjs", "kwin-bridge.cjs", "kwin-script.cjs", "stage.sh"])
+    assert.equal(fs.existsSync(path.join(feature, relative)), true, relative);
 });
 
 test("Chronicle-only packaging retains the shared backend for updater rebuilds", (t) => {

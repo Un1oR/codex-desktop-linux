@@ -8,6 +8,11 @@ const test = require("node:test");
 
 const flake = fs.readFileSync(path.resolve(__dirname, "../../flake.nix"), "utf8");
 
+test("directory installer retains the selected Mini helper in its runtime closure", () => {
+  const closure = flake.slice(flake.indexOf("installerRuntimeClosure ="), flake.indexOf("installerPreviousRuntimeClosure ="));
+  assert.match(closure, /globalDictationHelper\s+petKwinHelper\s+mcpReaperHelper/);
+});
+
 test("Nix Rust dependencies use the checksum-verified static crates.io endpoint", () => {
   assert.match(flake, /staticCratesFetchurl\s*=\s*args:\s*pkgs\.fetchurl/);
   assert.match(flake, /"https:\/\/crates\.io\/api\/v1\/crates"/);

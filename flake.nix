@@ -680,7 +680,7 @@
           lib.concatMapStringsSep "\n" toString (
             [
               sourceRoot upstreamDeb installedLauncher installerWorkspaceHelpers
-              globalDictationHelper mcpReaperHelper watchboundPackage pkgs.asar
+              globalDictationHelper petKwinHelper mcpReaperHelper watchboundPackage pkgs.asar
               pkgs.stdenv pkgs.stdenv.cc pkgs.bash pkgs.nodejs pkgs.patchelf
             ]
             ++ runtimeLibraries

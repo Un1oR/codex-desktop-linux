@@ -131,7 +131,9 @@ test("gesture identity reaches the controller and RPC completion retains its ori
   const service = new context.qde();
   service.origin = { id: 7 };
   service.manager = { codexPetOverlayCompleteRendererDrag: (...args) => args };
-  assert.deepEqual(service.codexPetOverlayCompleteDrag(id, false), [7, id, false]);
+  assert.deepEqual(service.codexPetOverlayCompleteDrag(id, false), [7, id, false, null]);
+  const sample = { pointerScreenX: 130, pointerScreenY: 100 };
+  assert.deepEqual(service.codexPetOverlayCompleteDrag(id, false, sample), [7, id, false, sample]);
 });
 
 function legacyAvatarOverlayBundleFixture() {
@@ -1490,7 +1492,7 @@ for (const origin of [{ x: -400, y: -200 }, { x: 400, y: 200 }])
     controller.windowManager.sendMessageToWebContents = (_contents, message) => messages.push(message);
     const localCursor = (x, y) => { cursor = { x: origin.x + x, y: origin.y + y }; };
     let proximityRequests = 0;
-    controller.codexPetOverlayKWinProximity = () => { proximityRequests += 1; };
+    controller.codexPetOverlayKWinProximity = () => { proximityRequests += 1; return true; };
     controller.updateCssPetControlsProximityTracking();
     assert.equal(proximityRequests, 1);
     assert.equal(tick, undefined, "native hover must not poll Electron's global pointer");

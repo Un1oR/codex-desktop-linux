@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::{io::Write, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader},
+    signal::unix::{signal, SignalKind},
     sync::{mpsc, Mutex},
 };
 use zbus::{message::Header, Connection, Proxy};
@@ -146,6 +148,10 @@ async fn unload(connection: &Connection, owner: &str, name: &str) -> Result<()> 
 }
 
 async fn run() -> Result<()> {
+    // Install before connecting so termination at any startup phase remains pending.
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut hangup = signal(SignalKind::hangup())?;
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() != 2
         || !args[0].starts_with("codex_pet_bridge_")
@@ -160,6 +166,9 @@ async fn run() -> Result<()> {
     }
     let connection = Connection::session().await?;
     let bus = zbus::fdo::DBusProxy::new(&connection).await?;
+    let mut owners = bus
+        .receive_name_owner_changed_with_args(&[(0, "org.kde.KWin")])
+        .await?;
     let owner = bus
         .get_name_owner("org.kde.KWin".try_into()?)
         .await?
@@ -179,15 +188,21 @@ async fn run() -> Result<()> {
     emit(
         &json!({"type":"listening", "address":connection.unique_name().context("missing bus name")?.as_str(), "owner":owner}),
     )?;
-    let result: Result<()> = async {
+    let input = async {
         let mut reader = BufReader::new(tokio::io::stdin());
         while let Some(command) = read_command(&mut reader).await? {
             send.try_send(serde_json::to_string(&command)?)
                 .context("Mini command queue is full")?;
         }
         Ok(())
-    }
-    .await;
+    };
+    let result = tokio::select! {
+        result = input => result,
+        _ = terminate.recv() => Ok(()),
+        _ = interrupt.recv() => Ok(()),
+        _ = hangup.recv() => Ok(()),
+        _ = owners.next() => Err(anyhow::anyhow!("KWin connection changed")),
+    };
     drop(send);
     let cleanup = tokio::time::timeout(
         Duration::from_secs(2),
@@ -202,10 +217,15 @@ async fn run() -> Result<()> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    if let Err(error) = run().await {
-        eprintln!("{error:#}");
-        std::process::exit(1);
-    }
+    let code = match run().await {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("{error:#}");
+            1
+        }
+    };
+    // Tokio's blocking stdin read can outlive cancellation; cleanup has completed.
+    std::process::exit(code);
 }
 
 #[cfg(test)]

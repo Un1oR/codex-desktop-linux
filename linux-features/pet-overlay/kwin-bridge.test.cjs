@@ -120,17 +120,19 @@ for (const mismatch of ["pid", "app", "title", "size", "ambiguous", "deleted"]) 
   if (mismatch !== "size") assert.equal(JSON.stringify(mini.frameGeometry), before);
 });
 
-function transport(t, { delayStart = false, omitAck = false } = {}) {
+function transport(t, { delayStart = false, omitAck = false, missingQdbus = false, spawnThrows = false, mkdirThrows = false } = {}) {
   const { workspace, mini } = world(process.pid), calls = [], errors = [], timers = [];
-  let file, receiver, queued, start;
+  const lifecycle = Object.assign(new EventEmitter(), { pid: process.pid, env: {} }), directories = [];
+  let file, receiver, queued, start, startupTimeout;
   const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
     kill() { this.emit("exit", 0); } });
   child.stdin.on("finish", () => child.emit("exit", 0));
   child.stdin.on("data", data => { const text = String(data).trim(); if (receiver) { const callback = receiver; receiver = null; callback(text); } else queued = text; });
   const childProcess = {
-    spawn: () => { setImmediate(() => child.stdout.write(JSON.stringify({ type: "listening", address: ":1.20", owner: ":1.10" }) + "\n")); return child; },
+    spawn: () => { if (spawnThrows) throw Error("spawn failed"); setImmediate(() => child.stdout.write(JSON.stringify({ type: "listening", address: ":1.20", owner: ":1.10" }) + "\n")); return child; },
     execFile(command, args, _options, callback) {
       calls.push(args);
+      if (missingQdbus) { callback(Object.assign(Error("missing qdbus"), { code: "ENOENT" })); return; }
       if (args[2].endsWith(".loadScript")) { file = args[3]; callback(null, "5\n"); return; }
       assert.equal(args[2], "org.kde.kwin.Scripting.start");
       start = () => {
@@ -149,13 +151,44 @@ function transport(t, { delayStart = false, omitAck = false } = {}) {
   };
   const scope = { exports: {} };
   vm.runInNewContext(fs.readFileSync(require.resolve("./kwin-bridge.cjs"), "utf8"), {
-    module: scope, process, Buffer, setTimeout, clearTimeout,
-    require: name => name === "node:child_process" ? childProcess : require(name),
+    module: scope, process: lifecycle, Buffer, clearTimeout,
+    setTimeout: (fn, delay) => { if (delay === 3000) { startupTimeout = fn; return { unref() {} }; } return setTimeout(fn, delay); },
+    require: name => name === "node:child_process" ? childProcess : name === "node:fs" ? { ...fs,
+      mkdtempSync(prefix) { if (mkdirThrows) throw Error("mkdir failed"); const directory = fs.mkdtempSync(prefix); directories.push(directory); return directory; },
+    } : require(name),
   });
-  const bridge = new scope.exports.KWinBridge({ resourcesPath: "/fixture/resources", onError: e => errors.push(e) });
+  let bridge;
+  try { bridge = new scope.exports.KWinBridge({ resourcesPath: "/fixture/resources", onError: e => errors.push(e) }); }
+  catch (error) { return { error, lifecycle, directories }; }
   t.after(async () => { await bridge.close().catch(() => {}); child.emit("exit", 0); });
-  return { bridge, workspace, mini, calls, errors, child, start: () => start() };
+  return { bridge, workspace, mini, calls, errors, child, lifecycle, directories, timers,
+    startupTimeout: () => startupTimeout(), start: () => start() };
 }
+
+for (const reason of ["qdbus", "startup"]) test(`failed ${reason} startup releases helper, directory and exit listener`, async t => {
+  const k = transport(t, { missingQdbus: reason === "qdbus", delayStart: reason === "startup" });
+  if (reason === "startup") k.startupTimeout();
+  await assert.rejects(k.bridge.ready);
+  await k.bridge.stopped;
+  assert.equal(k.bridge.closed, true);
+  assert.equal(fs.existsSync(k.directories[0]), false);
+  assert.equal(k.lifecycle.listenerCount("exit"), 0);
+});
+
+for (const reason of ["spawn", "mkdir"]) test(`synchronous ${reason} failure releases partial constructor resources`, t => {
+  const k = transport(t, { spawnThrows: reason === "spawn", mkdirThrows: reason === "mkdir" });
+  assert.match(k.error.message, /failed/);
+  assert.equal(k.lifecycle.listenerCount("exit"), 0);
+  for (const directory of k.directories) assert.equal(fs.existsSync(directory), false);
+});
+
+test("normal parent exit removes its temporary script directory synchronously", async t => {
+  const k = transport(t); await k.bridge.ready;
+  assert.equal(fs.existsSync(k.directories[0]), true);
+  k.lifecycle.emit("exit");
+  assert.equal(fs.existsSync(k.directories[0]), false);
+  assert.equal(k.lifecycle.listenerCount("exit"), 0);
+});
 
 test("a colliding allocated ID never gets addressed; bootstrap waits for its own script's READY", async t => {
   const k = transport(t, { delayStart: true });
@@ -191,4 +224,22 @@ test("missing command ACK closes the session and late output cannot reopen it", 
   clearTimeout(keepAlive);
   assert.equal(k.bridge.closed, true);
   await assert.rejects(k.bridge.request("prepare", size), /closed/);
+});
+
+for (const operation of ["endDrag", "stop"]) test(`queue overflow tears down the session rather than dropping ${operation}`, async t => {
+  const k = transport(t); await k.bridge.ready;
+  await k.bridge.request("prepare", size);
+  await k.bridge.request("drag", { id: k.mini.internalId, pointer: { x: 50, y: 50 }, areas });
+  k.child.stdin.removeAllListeners("data");
+  const pending = Array.from({ length: 16 }, () => k.bridge.request("proximity", { rects: [], enter: 0, exit: 0 }));
+  const settled = Promise.allSettled(pending);
+  await assert.rejects(k.bridge.request(operation), /queue is full/);
+  assert.equal(k.bridge.closed, true);
+  assert.ok((await settled).every(result => result.status === "rejected"));
+  await k.bridge.stopped;
+  assert.equal(k.bridge.queued, 0);
+  k.timers[0].timeout.emit();
+  const before = JSON.stringify(k.mini.frameGeometry);
+  k.workspace.cursorPos.x += 100; k.workspace.cursorPosChanged.emit();
+  assert.equal(JSON.stringify(k.mini.frameGeometry), before);
 });

@@ -39,10 +39,12 @@ function bridgeForSession(kwin, { calls = [], beforeCommand = async () => {} } =
     epoch = 1;
     tail = Promise.resolve();
     constructor(options) { this.options = options; }
+    fail(error) { this.closed = true; this.options.onError(error); }
     request(op, data, valid = () => true) {
       const epoch = this.epoch;
       const pending = this.tail.catch(() => {}).then(async () => {
         await beforeCommand(op, data);
+        if (this.closed) throw Error("Mini KWin bridge is closed");
         if (epoch !== this.epoch || !valid()) throw Object.assign(Error("cancelled"), { code: "CANCELLED" });
         calls.push(op);
         const ack = kwin.send(op, JSON.parse(JSON.stringify(data ?? {})), { epoch });

@@ -49,6 +49,26 @@ test("other compositor paths keep synchronous click and release handling", async
   await done;
 });
 
+test("other compositor paths retain the release-only move before ending the gesture", async () => {
+  const k = scenario({ native: false }); k.down();
+  k.event.screenX += 30; k.event.clientX += 30;
+  await k.up();
+  assert.equal(k.calls.length, 0);
+  assert.equal(k.clicks.length, 0);
+  assert.deepEqual(k.messages.map(m => m.type), ["avatar-overlay-drag-start", "avatar-overlay-drag-move", "avatar-overlay-drag-end"]);
+});
+
+test("already moving fallback retains its end sample without adding a synthetic move", async () => {
+  const k = scenario({ complete: async () => false }); k.down();
+  k.context.Ii.current.hasMoved = true;
+  k.event.screenX = 230; k.event.clientX = 204;
+  await k.up();
+  assert.deepEqual({ ...k.calls[0][2] }, { pointerScreenX: 230, pointerScreenY: 100,
+    shouldMove: false, pointerWindowX: 204, pointerWindowY: 74 });
+  assert.equal(k.clicks.length, 0);
+  assert.deepEqual(k.messages.map(m => m.type), ["avatar-overlay-drag-start"]);
+});
+
 test("gesture patch accepts renamed identifiers and rejects missing or ambiguous anchors", () => {
   const renamed = fixture.replace(/\b(?:ma|ga|Ii|Ct|w)\b/g, id => `$${id}`);
   assert.doesNotThrow(() => new vm.Script(applyPetOverlayGestureRendererPatch(renamed)));

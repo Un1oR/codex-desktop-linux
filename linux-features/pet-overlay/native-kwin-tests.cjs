@@ -7,9 +7,9 @@ const rendererGesture = require("./fixtures/renderer-gesture.cjs");
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
 module.exports = function register({ controllerFromPatchedSource, applyPetOverlayPatch, nativePresentationBundleFixture }) {
-  function scenario({ desktop = "KDE", ozonePlatform = "wayland", mode = "interactive", lockPosition = false } = {}) {
+  function scenario({ desktop = "KDE", ozonePlatform = "wayland", mode = "interactive", lockPosition = false, proximity = false, constructionFails = false } = {}) {
     const state = { visible: false, destroyed: false, focusable: false, width: 1920, height: 1200 };
-    const calls = [], timers = [], errors = [];
+    const calls = [], timers = [], errors = [], bridges = [], intervals = [];
     let active, physical = { x: 0, y: 0, width: 1920, height: 1200 };
     const mini = { pid: 4242, caption: "Codex Pet Overlay", resourceClass: "codex-desktop", wantsInput: true,
       internalId: "{60115083-b547-4bfe-b29f-3736ebcd996b}", frameGeometryChanged: signal(),
@@ -19,12 +19,17 @@ module.exports = function register({ controllerFromPatchedSource, applyPetOverla
       get activeWindow() { return active; }, set activeWindow(value) { active = value; workspace.windowActivated.emit(value); } };
     const kwin = session(workspace);
     let gate = async () => {};
-    const FakeBridge = bridgeForSession(kwin, { calls, beforeCommand: (...args) => gate(...args) });
+    const SessionBridge = bridgeForSession(kwin, { calls, beforeCommand: (...args) => gate(...args) });
+    class FakeBridge extends SessionBridge {
+      constructor(options) { super(options); bridges.push(this); if (constructionFails) throw Error("Cannot create bridge directory"); }
+    }
     const { controller } = controllerFromPatchedSource(applyPetOverlayPatch(nativePresentationBundleFixture()
       .replace("let e=tm(this.layout),t=e;", "let e=tm(this.layout),t=e;return t;"), {
       feature: { settings: { petOverlay: { mode, lockPosition } } },
     }), { ozonePlatform, process: { env: { XDG_CURRENT_DESKTOP: desktop } }, KWinBridge: FakeBridge,
       setTimeout: (callback, delay) => { const timer = { callback, delay, unref() {} }; timers.push(timer); return timer; },
+      setInterval: callback => { const timer = { callback, unref() {} }; intervals.push(timer); return timer; },
+      clearInterval: timer => { timer.cancelled = true; },
       clearTimeout: timer => { if (timer) timer.cancelled = true; } });
     const window = Object.assign(new EventEmitter(), { webContents: { id: 1, focus() {} },
       isDestroyed: () => state.destroyed, isVisible: () => state.visible, isFocusable: () => state.focusable,
@@ -45,10 +50,10 @@ module.exports = function register({ controllerFromPatchedSource, applyPetOverla
     controller.windowManager.setPendingAuxiliaryActivationTarget = () => {};
     controller.windowManager.sendMessageToWebContents = () => {};
     controller.codexPetOverlayScheduleKWinHints = () => {};
-    controller.updateCssPetControlsProximityTracking = () => {};
+    if (!proximity) controller.updateCssPetControlsProximityTracking = () => {};
     controller.setPetPointerProximity = value => { state.near = value; };
     controller.logger = () => ({ debug() {}, info() {}, warning: (...args) => errors.push(args) });
-    return { controller, window, workspace, mini, kwin, state, calls, timers, errors,
+    return { controller, window, workspace, mini, kwin, state, calls, timers, errors, bridges, intervals,
       gate: fn => { gate = fn; }, show: () => controller.showWindow(window) };
   }
 
@@ -130,6 +135,22 @@ module.exports = function register({ controllerFromPatchedSource, applyPetOverla
     assert.equal(k.workspace.activeWindow, k.mini);
   });
 
+  test("rapid hide/show behind a pending command re-arms pointer policy after Stop", async () => {
+    const k = scenario(); k.show(); await settle();
+    let release;
+    k.gate(op => op === "hints" ? new Promise(resolve => { release = resolve; }) : undefined);
+    const pending = k.bridges[0].request("hints", k.controller.codexPetOverlayKWinData(k.window));
+    const settled = Promise.allSettled([pending]);
+    await settle();
+    k.window.hide(); k.show(); k.controller.setKeyboardInteraction(1, true);
+    await settle();
+    k.gate(async () => {}); release(); await settled; await settle();
+    assert.equal(k.calls.filter(op => op === "prepare").length, 2);
+    assert.equal(k.state.visible, true);
+    assert.equal(k.state.electronFocus, true);
+    assert.ok(k.calls.indexOf("stop") < k.calls.lastIndexOf("prepare"));
+  });
+
   test("preparation timeout remains visible and serializes late cleanup before keyboard mode", async () => {
     const k = scenario(); let release;
     k.gate(op => op === "prepare" ? new Promise(resolve => { release = resolve; }) : undefined);
@@ -191,6 +212,64 @@ module.exports = function register({ controllerFromPatchedSource, applyPetOverla
     assert.equal(k.controller.petControlsProximityTimer, undefined);
   });
 
+  for (const constructionFails of [false, true]) test(`failed bridge restores upstream input and proximity; construction=${constructionFails}`, async () => {
+    const k = scenario({ proximity: true, constructionFails });
+    k.controller.showsPetControls = true;
+    k.controller.layout = { mascot: { left: 10, top: 10, width: 80, height: 80 } };
+    k.controller.petControlsProximityRects = [];
+    k.controller.petControlsAppearance = { proximityEnterDistance: 10, proximityExitDistance: 20 };
+    assert.doesNotThrow(k.show); await settle();
+    if (!constructionFails) {
+      k.bridges[0].fail(Error("KWin restarted"));
+      await settle();
+    }
+    k.controller.setKeyboardInteraction(1, true); await settle();
+    assert.equal(k.state.electronFocus, true);
+    assert.equal(k.intervals.length, 1, "upstream proximity timer survives failed integration");
+    for (let i = 0; i < 3; i += 1) k.controller.updateCssPetControlsProximityTracking();
+    assert.equal(k.bridges.length, 1, "layout updates do not restart a failed bridge");
+  });
+
+  test("next show reconnects a failed bridge and hide invalidates the replacement", async () => {
+    const k = scenario(); k.show(); await settle();
+    const old = k.bridges[0]; old.fail(Error("lost ACK")); await settle();
+    k.window.hide(); await settle();
+    k.show(); await settle();
+    assert.equal(k.bridges.length, 2);
+    assert.equal(k.window.listenerCount("hide"), 1);
+    const replacement = k.bridges[1], epoch = replacement.epoch;
+    old.options.onNear(true);
+    assert.notEqual(k.state.near, true, "old bridge events cannot change the replacement");
+    k.window.hide(); await settle();
+    assert.equal(replacement.epoch, epoch + 1);
+  });
+
+  for (const hide of [false, true]) test(`retry waits for old helper teardown before constructing a new bridge; hide=${hide}`, async () => {
+    const k = scenario(); k.show(); await settle();
+    let stopped;
+    k.bridges[0].stopped = new Promise(resolve => { stopped = resolve; });
+    k.bridges[0].fail(Error("ACK timeout")); k.window.hide(); await settle();
+    k.show(); k.controller.setKeyboardInteraction(1, true); await settle();
+    assert.equal(k.bridges.length, 1);
+    assert.equal(k.state.electronFocus, undefined);
+    if (hide) k.window.hide();
+    stopped(); await settle();
+    assert.equal(k.bridges.length, hide ? 1 : 2);
+    assert.equal(k.state.electronFocus, hide ? undefined : true);
+  });
+
+  for (const hide of [false, true]) test(`failed pointer release waits for teardown before fallback focus; hide=${hide}`, async () => {
+    const k = scenario(); k.show(); await settle();
+    let stopped;
+    k.bridges[0].stopped = new Promise(resolve => { stopped = resolve; });
+    k.bridges[0].fail(Error("ACK timeout"));
+    k.controller.setKeyboardInteraction(1, true); await settle();
+    assert.equal(k.state.electronFocus, undefined);
+    if (hide) k.window.hide();
+    stopped(); await settle();
+    assert.equal(k.state.electronFocus, hide ? undefined : true);
+  });
+
   function dragScenario(options) {
     const k = scenario(options), c = k.controller;
     c.codexPetOverlayDesiredWindowBounds = { x: 300, y: 200, width: 1920, height: 1200 };
@@ -210,7 +289,7 @@ module.exports = function register({ controllerFromPatchedSource, applyPetOverla
         pointerScreenY: k.workspace.cursorPos.y, codexPetOverlayGestureId: gestureId });
     };
     const renderer = () => rendererGesture({ native: layoutMessage().codexPetOverlayNativeDrag,
-      complete: (id, alt) => c.codexPetOverlayCompleteRendererDrag(1, id, alt),
+      complete: (id, alt, sample) => c.codexPetOverlayCompleteRendererDrag(1, id, alt, sample),
       dispatch(type, payload) {
         if (type === "avatar-overlay-drag-start") start(payload.codexPetOverlayGestureId);
         else if (type === "avatar-overlay-drag-end") c.endDrag(1, payload, payload.altKey);
@@ -226,6 +305,91 @@ module.exports = function register({ controllerFromPatchedSource, applyPetOverla
     assert.equal(r.calls.length, 0);
     assert.equal(k.calls.includes("drag"), false);
     assert.deepEqual({ ...k.mini.frameGeometry }, bounds);
+  });
+
+  test("unmatched compositor and stale mascot hit bounds end the accepted upstream drag and keep its click", async () => {
+    const k = dragScenario(); k.show(); await settle();
+    k.controller.codexPetOverlayKWinFindWindow = () => null;
+    k.controller.layout.mascot = { left: 100, top: 100, width: 80, height: 80 };
+    const r = k.renderer(); r.down();
+    assert.ok(k.controller.dragState);
+    const drag = k.controller.dragState;
+    assert.equal(k.controller.codexPetOverlayMascotDragState, undefined);
+    await r.up();
+    assert.equal(k.controller.dragState, null);
+    assert.equal(r.clicks.length, 1);
+    assert.equal(drag.hasMovementIntent, false, "a stationary fallback click is not a drag");
+    assert.equal(k.calls.includes("drag"), false);
+  });
+
+  test("local fallback applies the final release sample before ending its gesture", async () => {
+    const k = dragScenario(); k.show(); await settle();
+    k.controller.codexPetOverlayKWinFindWindow = () => null;
+    const r = k.renderer(); r.down();
+    // Wayland's advisory screen position differs from KWin geometry; local coordinates remain valid.
+    r.event.screenX += 76; r.event.screenY += 86;
+    r.event.clientX = 150; r.event.clientY = 160;
+    await r.up();
+    assert.deepEqual({ ...k.controller.codexPetOverlayMascotLocalPosition }, { left: 126, top: 136 });
+    assert.equal(k.controller.codexPetOverlayMascotDragState, null);
+    assert.equal(r.clicks.length, 0);
+    assert.deepEqual(r.messages.map(message => message.type), ["avatar-overlay-drag-start"]);
+  });
+
+  for (const alt of [false, true]) test(`stationary native click preserves snapped placement; Alt=${alt}`, async () => {
+    const k = dragScenario(); k.show(); await settle();
+    const c = k.controller, snap = { x: 350, y: 250 };
+    c.isFreelyPositioned = false; c.snapPosition = snap;
+    c.snapQuickChatToPosition = () => assert.fail("Alt-click must not perform a snap drag");
+    c.animatePresentationTo = c.snapQuickChatToPosition;
+    const r = k.renderer(); r.event.altKey = alt;
+    r.down(); await settle(); await r.up();
+    assert.equal(r.clicks.length, 1);
+    assert.equal(c.isFreelyPositioned, false);
+    assert.equal(c.snapPosition, snap);
+    assert.equal(c.dragState, null);
+    assert.equal(c.nativeWindowDragActive, false);
+    assert.equal(c.codexPetOverlayKWinDragState, null);
+    assert.equal(k.saved.length, 0);
+  });
+
+  test("stationary native release flushes a deferred content layout exactly once", async () => {
+    const k = dragScenario(); k.show(); await settle();
+    const c = k.controller, r = k.renderer();
+    r.down(); await settle();
+    const apply = c.applyLatestElementSizes.bind(c); let layouts = 0;
+    c.applyLatestElementSizes = window => { layouts += 1; apply(window); };
+    c.mascotSize = { width: 96, height: 88 };
+    c.hasDeferredLayout = true;
+    await r.up();
+    assert.equal(layouts, 1);
+    assert.equal(c.hasDeferredLayout, false);
+    assert.equal(c.anchor.width, 96);
+    assert.equal(c.anchor.height, 88);
+    assert.equal(c.dragState, null);
+    assert.equal(r.clicks.length, 1);
+    assert.equal(k.saved.length, 0);
+  });
+
+  test("failed native release applies deferred content without saving unknown geometry or clicking", async () => {
+    const k = dragScenario(); k.show(); await settle();
+    const c = k.controller, r = k.renderer(), anchor = { ...c.anchor };
+    r.down(); await settle();
+    const apply = c.applyLatestElementSizes.bind(c); let layouts = 0;
+    c.applyLatestElementSizes = window => { layouts += 1; apply(window); };
+    c.mascotSize = { width: 96, height: 88 };
+    c.hasDeferredLayout = true;
+    k.bridges[0].fail(Error("ACK timeout"));
+    await r.up();
+    assert.equal(layouts, 1);
+    assert.equal(c.hasDeferredLayout, false);
+    assert.equal(c.anchor.width, 96);
+    assert.equal(c.anchor.height, 88);
+    assert.equal(c.anchor.x, anchor.x);
+    assert.equal(c.anchor.y, anchor.y);
+    assert.equal(c.dragState, null);
+    assert.equal(r.clicks.length, 0);
+    assert.equal(k.saved.length, 0);
   });
 
   test("renderer release cancels a gesture waiting for placement acknowledgement", async () => {
@@ -292,7 +456,7 @@ module.exports = function register({ controllerFromPatchedSource, applyPetOverla
     k.gate(op => op === "endDrag" ? new Promise(resolve => { release = resolve; }) : undefined);
     const result = k.controller.codexPetOverlayCompleteRendererDrag(1, id, false).then(value => { done = true; return value; });
     await settle(); assert.equal(done, false); assert.equal(k.saved.length, 0);
-    release(); assert.equal(await result, moved); assert.equal(k.saved.length, 1);
+    release(); assert.equal(await result, moved); assert.equal(k.saved.length, moved ? 1 : 0);
     await assert.rejects(k.controller.codexPetOverlayCompleteRendererDrag(1, id, false), /Stale/);
   });
 
@@ -301,6 +465,11 @@ module.exports = function register({ controllerFromPatchedSource, applyPetOverla
     k.show(); await settle(); k.start(id); await settle();
     for (const [caller, token, alt] of [[2, id, false], [1, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", false], [1, id, "false"]])
       await assert.rejects(k.controller.codexPetOverlayCompleteRendererDrag(caller, token, alt));
+    for (const sample of [{}, { shouldMove: false, pointerScreenX: Infinity, pointerScreenY: 1 },
+      { shouldMove: "false", pointerScreenX: 1, pointerScreenY: 1 },
+      { shouldMove: false, pointerScreenX: 1, pointerScreenY: 1, pointerWindowX: 2 },
+      { shouldMove: true, pointerScreenX: 1, pointerScreenY: 1, pointerWindowX: null, pointerWindowY: null }])
+      await assert.rejects(k.controller.codexPetOverlayCompleteRendererDrag(1, id, false, sample));
     assert.equal(k.controller.codexPetOverlayKWinDragState.ending, undefined);
     assert.equal(k.calls.includes("endDrag"), false);
     await k.controller.codexPetOverlayCompleteRendererDrag(1, id, false);

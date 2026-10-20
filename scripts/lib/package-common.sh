@@ -186,6 +186,7 @@ stage_update_builder_linux_features_tree() {
         if [ "$feature_id" = "pet-overlay" ]; then
             rm -rf \
                 "$destination/kwin-helper/src" \
+                "$destination/kwin-helper/tests" \
                 "$destination/kwin-helper/Cargo.toml" \
                 "$destination/kwin-helper/Cargo.lock"
         fi

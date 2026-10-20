@@ -386,7 +386,7 @@ function codexPetOverlayPumpKWinDrag(pending) {
 
 function codexPetOverlayBeginKWinDrag(window, event) {
   if (window == null || window.isDestroyed?.() || this.window !== window || !this.codexPetOverlayShouldUseKWin()) return false;
-  if (this.codexPetOverlayIsNativeKWin() && this.codexPetOverlayKWinBridge?.closed) return false;
+  if (this.codexPetOverlayIsNativeKWin() && !this.codexPetOverlayKWinBridgeFor(window)) return false;
   if (this.codexPetOverlayKWinDragCurrent(this.codexPetOverlayKWinDragState)) return true;
   const native = this.codexPetOverlayIsNativeKWin();
   const position = native ? this.codexPetOverlayKWinFindWindow(window) : null;
@@ -414,6 +414,17 @@ function codexPetOverlayKWinFinish(window, altKey) {
   if (position) {
     this.codexPetOverlayKWinPosition = position;
     if (this.layout && drag.mascot) this.layout = { ...this.layout, mascot: drag.mascot };
+    if (drag.result.moved === false) {
+      this.nativeWindowDragActive = false;
+      this.nativeWindowDragStart = null;
+      // Upstream records every native geometry completion as movement, including a click.
+      this.dragState = null;
+      this.clearNativeWindowDragCompletionTimer();
+      this.suppressNextRendererThrow = false;
+      if (drag.mascot) this.anchor = { ...this.anchor, x: position.bounds.x + drag.mascot.left, y: position.bounds.y + drag.mascot.top };
+      if (this.hasDeferredLayout) { this.hasDeferredLayout = false; this.applyLatestElementSizes(window); }
+      return { codexPetOverlayNoMovement: true };
+    }
     return { bounds: position.bounds, altKey };
   }
   // Keep the last saved anchor if the compositor cannot supply a final position.
@@ -422,8 +433,10 @@ function codexPetOverlayKWinFinish(window, altKey) {
   this.dragState = null;
   this.nativeWindowDragActive = false;
   this.nativeWindowDragStart = null;
+  const deferred = this.hasDeferredLayout;
   this.hasDeferredLayout = false;
   this.suppressNextRendererThrow = true;
+  if (deferred) this.applyLatestElementSizes(window);
   if (!drag.pending) this.logger().warning?.("Could not read final KWin Pet position; preserving the saved position", { safe: {} });
   return { codexPetOverlayCancelled: true };
 }
@@ -453,7 +466,7 @@ function codexPetOverlayKWinKeyboard(window, enabled, proceed) {
   const pointer = this.codexPetOverlayKWinPointer;
   if (!pointer) { proceed(); return; }
   void pointer.cancel().then(released => {
-    if (released && this.codexPetOverlayKWinKeyboardRequest === request && this.windowVisibilitySequence === sequence && this.window === window &&
+    if ((released || this.codexPetOverlayKWinBridge?.closed || this.codexPetOverlayKWinBridgeFailed) && this.codexPetOverlayKWinKeyboardRequest === request && this.windowVisibilitySequence === sequence && this.window === window &&
         !window.isDestroyed() && window.isVisible() && this.shouldPresentWindow() && this.pendingQuickChatFocus == null) proceed();
   });
 }
@@ -493,9 +506,17 @@ function codexPetOverlayPresentKWinWindow(window, present) {
   try {
     timer = setTimeout(() => request.finish(false), 1500);
     timer.unref?.();
-    window.setFocusable(false);
-    request.pointer = this.codexPetOverlayStartKWinPointer(window, request.bounds);
-    void request.pointer.ready.then(ready => {
+    void (async () => {
+      const previous = this.codexPetOverlayKWinBridge;
+      if (previous?.closed) await previous.stopped;
+      if (this.codexPetOverlayKWinPresentation !== request) return;
+      if (this.window !== window || window.isDestroyed() || this.windowVisibilitySequence !== sequence || !this.shouldPresentWindow()) {
+        request.finish(false); return;
+      }
+      this.codexPetOverlayKWinBridgeFor(window, true);
+      window.setFocusable(false);
+      request.pointer = this.codexPetOverlayStartKWinPointer(window, request.bounds);
+      const ready = await (request.pointer?.ready ?? false);
       if (ready && this.codexPetOverlayKWinPresentation === request && ["x", "y", "width", "height"].some(key =>
         request.bounds?.[key] !== this.codexPetOverlayDesiredWindowBounds?.[key])) {
         const keyboard = request.keyboard;
@@ -503,7 +524,7 @@ function codexPetOverlayPresentKWinWindow(window, present) {
         this.showWindow(window);
         if (this.codexPetOverlayKWinPresentation) this.codexPetOverlayKWinPresentation.keyboard = keyboard;
       } else request.finish(ready);
-    });
+    })().catch(() => request.finish(false));
   } catch { request.finish(false); }
 }
 
@@ -597,7 +618,7 @@ function buildPetOverlayMethods(settings) {
     "codexPetOverlayScheduleKWinHints(e){if(!this.codexPetOverlayShouldUseKWin()||this.dragState!=null||this.codexPetOverlayKWinDragState!=null)return;if(this.codexPetOverlayKWinHintInFlight){this.codexPetOverlayKWinPendingHints=!0;return}this.codexPetOverlayKWinPendingHints=!1;try{this.codexPetOverlayKWinTimers?.forEach(clearTimeout)}catch{}this.codexPetOverlayKWinTimers=[0,80,300,1000,2500].map(t=>{let n=setTimeout(()=>{try{this.codexPetOverlayApplyKWinHints(e)}catch{}},t);try{n.unref?.()}catch{}return n})}",
     "codexPetOverlayKWinExecSync(e){return this.codexPetOverlayKWinExecResult(e)!=null}",
     "codexPetOverlayKWinDragScript(){let e={pid:Number(process.pid),title:`Codex Pet Overlay`};return `(function(){var d=${JSON.stringify(e)};function windows(){try{if(typeof workspace.windowList==='function')return workspace.windowList()}catch(e){}try{if(typeof workspace.clientList==='function')return workspace.clientList()}catch(e){}return[]}var a=windows().filter(function(w){try{return String(w.caption||'')===d.title&&Number(w.pid)===d.pid}catch(e){return false}});if(a.length!==1)return;var w=a[0],p=workspace.cursorPos,g=w.frameGeometry,dx=Number(p.x)-Number(g.x),dy=Number(p.y)-Number(g.y),active=true;function move(){if(!active)return;try{var p=workspace.cursorPos,g=w.frameGeometry;w.frameGeometry={x:Math.round(Number(p.x)-dx),y:Math.round(Number(p.y)-dy),width:g.width,height:g.height}}catch(e){stop()}}function stop(){if(!active)return;active=false;try{workspace.cursorPosChanged.disconnect(move)}catch(e){}}try{workspace.cursorPosChanged.connect(move)}catch(e){return}try{workspace.windowRemoved.connect(function(v){if(v===w)stop()})}catch(e){}try{if(typeof workspace.raiseWindow==='function')workspace.raiseWindow(w)}catch(e){}})()`}",
-    "codexPetOverlayReleaseKWinDrag(e){if(e?.native){if(!e.stopped){e.released=!0;e.stopped=!0;void this.codexPetOverlayKWinBridgeFor(e.window).request(`endDrag`,{},()=>this.window===e.window&&!e.window.isDestroyed()).catch(()=>{})}return}if(e?.pluginName==null)return;try{this.codexPetOverlayKWinExecSync([`org.kde.KWin`,`/Scripting`,`org.kde.kwin.Scripting.unloadScript`,e.pluginName])}catch{}try{require(`node:fs`).unlinkSync(e.scriptPath)}catch{}}",
+    "codexPetOverlayReleaseKWinDrag(e){if(e?.native){if(!e.stopped){e.released=!0;e.stopped=!0;void e.bridge?.request(`endDrag`,{},()=>this.window===e.window&&!e.window.isDestroyed()).catch(()=>{})}return}if(e?.pluginName==null)return;try{this.codexPetOverlayKWinExecSync([`org.kde.KWin`,`/Scripting`,`org.kde.kwin.Scripting.unloadScript`,e.pluginName])}catch{}try{require(`node:fs`).unlinkSync(e.scriptPath)}catch{}}",
     "codexPetOverlayKWinDragCurrent(e){if(e==null||this.codexPetOverlayKWinDragState!==e||this.codexPetOverlayKWinDragGeneration!==e.generation)return!1;if(this.window===e.window&&!e.window?.isDestroyed?.())return!0;this.codexPetOverlayKWinDragState=null,this.codexPetOverlayReleaseKWinDrag(e);return!1}",
     "codexPetOverlayQueueKWinDrag(e){let t=this.codexPetOverlayKWinDragState;return this.codexPetOverlayKWinDragCurrent(t)&&t.window===e}",
     "codexPetOverlayEndKWinDrag(e,t){let n=this.codexPetOverlayKWinDragState;if(!this.codexPetOverlayKWinDragCurrent(n)||n.window!==e)return!1;this.codexPetOverlayKWinDragState=null,this.codexPetOverlayReleaseKWinDrag(n);try{typeof t===`function`&&t()}catch{}try{this.window!=null&&!this.window.isDestroyed?.()&&this.window.isVisible?.()!==!1&&this.codexPetOverlayScheduleKWinHints(this.window)}catch{}return!0}",
@@ -702,7 +723,7 @@ function patchCompositorDragLifecycle(source) {
     patched = replaceMethodText(
       patched,
       startMethod,
-      `${startMethod.text.slice(0, -1)},this.codexPetOverlayBeginCompositorDrag(${windowMatch[1]},${eventArg})}`,
+      `${startMethod.text.slice(0, -1)},this.codexPetOverlayIsNativeKWin()&&Object.assign(this.dragState,{codexPetOverlayGestureId:${eventArg}.codexPetOverlayGestureId,codexPetOverlayWindow:${windowMatch[1]},codexPetOverlaySequence:this.windowVisibilitySequence}),this.codexPetOverlayBeginCompositorDrag(${windowMatch[1]},${eventArg})}`,
     );
   }
 
@@ -785,7 +806,7 @@ function patchCompositorDragLifecycle(source) {
   const prefix = gated.slice(0, completionStart + added).replace(nativeState,
     nativeState.replace(`${nativeActive}?${stateFunction}(${stateWindow}):null`,
       `${nativeActive}?this.codexPetOverlayKWinFinish(${stateWindow},${altArg})??${stateFunction}(${stateWindow}):null`) +
-      `if(${stateVar}?.codexPetOverlayCancelled)return;`);
+      `if(${stateVar}?.codexPetOverlayCancelled||${stateVar}?.codexPetOverlayNoMovement)return;`);
   const niriCompletion = completionNeedle.replace(
     "if(this.suppressNextRendererThrow=",
     `${nativeBoundsVar}=this.codexPetOverlayDesiredWindowBounds??this.codexPetOverlayWindowBounds(${windowVar})??${nativeBoundsVar};if(this.suppressNextRendererThrow=`,
@@ -831,7 +852,7 @@ function patchKWinCoordinateConsumers(source) {
     const [read] = reads;
     let text = method.text.replace(read[0], `(this.codexPetOverlayKWinGeometry(${read[1]})??${read[0]})`);
     if (name === "updateCssPetControlsProximityTracking") {
-      text = method.match[0] + "if(this.codexPetOverlayIsNativeKWin()){if(this.petControlsProximityTimer!=null){clearInterval(this.petControlsProximityTimer);this.petControlsProximityTimer=null}this.codexPetOverlayKWinProximity();return;}" + text.slice(method.match[0].length);
+      text = method.match[0] + "if(this.codexPetOverlayIsNativeKWin()&&this.codexPetOverlayKWinProximity()){if(this.petControlsProximityTimer!=null){clearInterval(this.petControlsProximityTimer);this.petControlsProximityTimer=null}return;}" + text.slice(method.match[0].length);
     }
     if (name === "isOverlayWindowPointerDragActive") {
       text = method.match[0] + "if(this.codexPetOverlayIsNativeKWin()&&this.codexPetOverlayKWinDragCurrent(this.codexPetOverlayKWinDragState))return!0;" +
@@ -943,7 +964,7 @@ function patchKWinKeyboardFocus(source) {
 }
 
 function patchKWinGestureService(source) {
-  if (source.includes("codexPetOverlayCompleteDrag(e,t){")) return source;
+  if (source.includes("codexPetOverlayCompleteDrag(e,t,n=null){")) return source;
   const ident = "[A-Za-z_$][\\w$]*";
   const api = new RegExp(`completeQuickChatFocus\\((?<a>${ident}),(?<b>${ident})\\)\\{return this\\.(?<manager>${ident})\\.completeQuickChatFocus\\(this\\.(?<origin>${ident})\\.id,\\k<a>,\\k<b>\\)\\}`, "gu");
   const apis = [...source.matchAll(api)], routes = [...source.matchAll(/case`avatar-overlay-drag-start`:\{/gu)];
@@ -959,7 +980,7 @@ function patchKWinGestureService(source) {
   let patched = replaceMethodText(source, method, text);
   const { manager, origin } = apis[0].groups;
   patched = patched.replace(apis[0][0], apis[0][0] +
-    `codexPetOverlayCompleteDrag(e,t){return this.${manager}.codexPetOverlayCompleteRendererDrag(this.${origin}.id,e,t)}`);
+    `codexPetOverlayCompleteDrag(e,t,n=null){return this.${manager}.codexPetOverlayCompleteRendererDrag(this.${origin}.id,e,t,n)}`);
   const call = calls[0];
   return patched.replace(route, route.replace(call[0],
     `${call.groups.event}.codexPetOverlayGestureId=${call.groups.message}.codexPetOverlayGestureId;${call[0]}`));
@@ -1128,7 +1149,7 @@ function patchAvatarSelectionRefresh(source) {
 function hasCompletePetOverlayPatch(source, settings, avatarSelectionRefreshExpected, localMascotDragExpected) {
   const show = findAvatarOverlayMethod(source, /(?<![\w$.])showWindow\([^{}]*\)\{/);
   const requiredMarkers = [
-    source.includes("codexPetOverlayCompleteDrag(e,t){"),
+    source.includes("codexPetOverlayCompleteDrag(e,t,n=null){"),
     /\.codexPetOverlayGestureId=[A-Za-z_$][\w$]*\.codexPetOverlayGestureId/.test(source),
     findAvatarOverlayMethod(source, /(?<![\w$.])sendLayoutToRenderer\([^{}]*\)\{/)?.text.includes("codexPetOverlayNativeDrag:"),
     ...["setPointerRegions", "sendLayoutToRenderer"].map(name => findAvatarOverlayMethod(source,
@@ -1250,9 +1271,9 @@ function codexPetOverlayScheduleQuickChatFocus(complete, hidden) {
   return () => cancel(handle);
 }
 
-async function codexPetOverlayConfirmRendererDrag(gesture, api, altKey) {
+async function codexPetOverlayConfirmRendererDrag(gesture, api, altKey, sample) {
   try {
-    const moved = await api.codexPetOverlayCompleteDrag(gesture.codexPetOverlayGestureId, altKey);
+    const moved = await api.codexPetOverlayCompleteDrag(gesture.codexPetOverlayGestureId, altKey, sample);
     if (typeof moved !== "boolean") throw Error("Invalid Mini gesture acknowledgement");
     gesture.hasMoved ||= moved;
   } catch (error) {
@@ -1281,11 +1302,12 @@ function applyPetOverlayGestureRendererPatch(source) {
   const layout = one(new RegExp(`let\\{isGlobalRealtimeVoicePresentation:${ident},isVisible:${ident},layout:${ident},[^{};]+\\}=(?<message>${ident});`, "gu"), "gesture layout");
   const start = one(new RegExp(`${ref.replace(/[$]/g, "\\$")}\\.current=\\{beganOnQuickChatBar:`, "gu"), "gesture start");
   const dispatch = one(new RegExp(`(?<dispatcher>${ident})\\.dispatchMessage\\(\`avatar-overlay-drag-start\`,\\{`, "gu"), "gesture dispatch");
-  const finish = one(/let\{hasMoved:/gu, "gesture result", body);
+  const finish = one(new RegExp(`let\\{hasMoved:(?<moved>${ident}),releaseSample:(?<sample>${ident}),velocity:${ident}\\}=[^;]+;`, "gu"), "gesture result", body);
   let finalizer = body.replace(match[0], match[0].replace("=(", "=async("));
+  const pointer = `{pointerScreenX:codexPetOverlayReleaseSample.screenX,pointerScreenY:codexPetOverlayReleaseSample.screenY,shouldMove:${finish.groups.moved}&&!${gesture}.hasMoved&&${finish.groups.sample}!=null,...(${released}?{pointerWindowX:${event}.clientX,pointerWindowY:${event}.clientY}:{})}`;
   finalizer = finalizer.replace(finish[0],
-    `if(${gesture}.codexPetOverlayGestureId!=null)await codexPetOverlayConfirmRendererDrag(${gesture},${service}.avatarOverlay,${released}&&!${gesture}.usesOrbPhysics&&${event}.altKey===!0);${finish[0]}`);
-  for (const kind of ["end", "release"]) {
+    `${finish[0]}if(${gesture}.codexPetOverlayGestureId!=null){const codexPetOverlayReleaseSample=${finish.groups.sample}??${gesture}.samples.at(-1)??${gesture};await codexPetOverlayConfirmRendererDrag(${gesture},${service}.avatarOverlay,${released}&&!${gesture}.usesOrbPhysics&&${event}.altKey===!0,${pointer});${finish.groups.moved}||=${gesture}.hasMoved;}`);
+  for (const kind of ["move", "end", "release"]) {
     const call = one(new RegExp(`${dispatch.groups.dispatcher.replace(/[$]/g, "\\$")}\\.dispatchMessage\\(\`avatar-overlay-drag-${kind}\`,`, "gu"), `gesture ${kind}`, body)[0];
     finalizer = finalizer.replace(call, `${gesture}.codexPetOverlayGestureId==null&&${call}`);
   }

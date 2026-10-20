@@ -42,6 +42,18 @@ Feature settings can be overridden in the gitignored `features.json` file:
 }
 ```
 
+Selecting `pet-overlay` requires a Rust toolchain with Cargo to build its
+bundled helper on all desktop session types, including X11. Before running
+`./install.sh` or a direct package build, prepare the enabled native helpers:
+
+```bash
+make build-native-feature-helpers
+./install.sh
+```
+
+`make install-native` performs this preparation automatically. A prebuilt
+helper can also be supplied with `CODEX_PET_KWIN_SOURCE=/path/to/codex-pet-kwin`.
+
 `lockPosition: false` preserves manual pet moves when the existing window
 position is visible. In this default unlocked mode the overlay is frameless
 and the mascot has its own renderer gesture. On native Plasma Wayland,
@@ -194,17 +206,23 @@ click-through while the control expansion follows the existing hysteresis.
 
 The helper sends an idle transport heartbeat every 500 ms. If communication stops,
 the script disconnects its handlers after two seconds. An individual drag also
-expires after 30 seconds. A command acknowledgement timeout closes the bridge for
-that application session. On exit the helper unloads only its own unique script
-name and checks removal for a bounded interval; it never unloads foreign scripts.
-Its files and queued requests are bounded. A fresh application launch reconnects.
+expires after 30 seconds. A command acknowledgement timeout or queue overflow closes the current
+bridge. Input and control proximity return to the application's local handling;
+the next show of Mini attempts a fresh bridge connection. Construction failures
+are isolated from layout and input publication. Entering the editor waits for a
+failed helper to finish teardown before proceeding with local keyboard activation.
+On EOF, SIGTERM, SIGINT, SIGHUP or a KWin owner change, the helper unloads only its
+own unique script name and checks removal for a bounded interval. Cleanup targets
+the original KWin connection. Its files and queued requests are bounded; normal
+application exit removes the bridge's temporary directory.
 
 When compositor helpers are unavailable, the mascot uses local movement within
 the overlay. Failed final geometry confirmation retains the last saved position
-and logs a warning. Native Plasma's helper is built with
-`make build-native-feature-helpers`; packages, their update-builder and Nix carry
-it automatically when `pet-overlay` is selected. It can be supplied to a build
-with `CODEX_PET_KWIN_SOURCE=/path/to/codex-pet-kwin`.
+and logs a warning. A gesture handled entirely by the application's local path
+keeps its normal release and click behavior. Packages, their update-builder and
+Nix carry the prepared helper when `pet-overlay` is selected.
+Stationary compositor-confirmed clicks preserve the current snap/free-position
+state, including with Alt held; deferred content layout still runs on release.
 
 ## Niri Notes
 
