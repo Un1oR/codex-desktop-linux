@@ -24,6 +24,7 @@ test("Nix Rust dependencies use the checksum-verified static crates.io endpoint"
   for (const lockFile of [
     "./Cargo.lock",
     "./global-dictation-linux/Cargo.lock",
+    "./linux-features/pet-overlay/kwin-helper/Cargo.lock",
     "./linux-features/mcp-helper-reaper/reaper/Cargo.lock",
     "./nix/watchbound-Cargo.lock",
   ]) {
@@ -33,6 +34,6 @@ test("Nix Rust dependencies use the checksum-verified static crates.io endpoint"
     );
   }
 
-  assert.equal((flake.match(/staticCratesBuildRustPackage \{/g) ?? []).length, 4);
+  assert.equal((flake.match(/staticCratesBuildRustPackage \{/g) ?? []).length, 5);
   assert.doesNotMatch(flake, /pkgs\.rustPlatform\.buildRustPackage \{/);
 });

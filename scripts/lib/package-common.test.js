@@ -189,11 +189,26 @@ test("update-builder copies staged native feature artifacts without Cargo worksp
     "codex-computer-use-indicator",
     "codex-global-dictation-linux",
     "codex-mcp-helper-reaper",
+    "codex-pet-kwin",
     "codex-read-aloud-linux",
     "codex-record-replay-linux",
   ]) {
     assert.match(common, new RegExp(artifact));
   }
+});
+
+test("Mini packaging retains its helper independently of global shortcuts", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-update-builder-pet-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const config = path.join(root, "features.json"), app = path.join(root, "app"), builder = path.join(root, "builder");
+  const helper = path.join(app, "resources/native/codex-pet-kwin");
+  fs.writeFileSync(config, JSON.stringify({ enabled: ["pet-overlay"] }));
+  fs.mkdirSync(path.dirname(helper), { recursive: true });
+  fs.writeFileSync(helper, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  runPackageCommon(`CODEX_LINUX_FEATURES_CONFIG=${JSON.stringify(config)} stage_enabled_native_feature_artifacts ${JSON.stringify(builder)}`, app);
+  const retained = path.join(builder, "linux-features/pet-overlay/kwin-helper/target/release/codex-pet-kwin");
+  assert.equal(fs.readFileSync(retained, "utf8"), "#!/bin/sh\nexit 0\n");
+  assert.equal(fs.statSync(retained).mode & 0o777, 0o755);
 });
 
 test("Chronicle-only packaging retains the shared backend for updater rebuilds", (t) => {

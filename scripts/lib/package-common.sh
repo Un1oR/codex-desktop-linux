@@ -183,6 +183,12 @@ stage_update_builder_linux_features_tree() {
                 "$destination/reaper/Cargo.toml" \
                 "$destination/reaper/Cargo.lock"
         fi
+        if [ "$feature_id" = "pet-overlay" ]; then
+            rm -rf \
+                "$destination/kwin-helper/src" \
+                "$destination/kwin-helper/Cargo.toml" \
+                "$destination/kwin-helper/Cargo.lock"
+        fi
     done < "$feature_dirs_file"
     rm -f "$feature_dirs_file"
 }
@@ -1034,6 +1040,12 @@ stage_enabled_native_feature_artifacts() {
                 stage_update_builder_native_artifact \
                     "$APP_DIR/resources/native/codex-global-dictation-linux" \
                     "$update_builder_root/global-dictation-linux/target/release/codex-global-dictation-linux" \
+                    "$feature_id helper"
+                ;;
+            pet-overlay)
+                stage_update_builder_native_artifact \
+                    "$APP_DIR/resources/native/codex-pet-kwin" \
+                    "$update_builder_root/linux-features/pet-overlay/kwin-helper/target/release/codex-pet-kwin" \
                     "$feature_id helper"
                 ;;
             mcp-helper-reaper)
